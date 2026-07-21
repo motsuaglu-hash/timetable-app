@@ -57,6 +57,14 @@ function generateId() {
 const MAIN_SUBJECTS = ["国語", "数学", "英語", "理科", "社会"];
 const GRADE_FIXABLE_SUBJECTS = ["学活", "道徳", "総合"];
 
+// 学年を持たない学級（特別支援学級など）をグループ化する際の目印キー
+const MIXED_GRADE_KEY = "mixed";
+
+// 学級配列を並び替える際のソート用の値（学年なしは末尾へ）
+function gradeSortValue(grade) {
+  return grade == null ? Infinity : grade;
+}
+
 const CONSECUTIVE_LIMIT_OPTIONS = [
   { value: "none", label: "制限なし" },
   { value: "max2", label: "最大2時間" },
@@ -309,7 +317,7 @@ function checkErrors(placements, lessons, teachers, meetings, days, classes = []
       // 同じ時間帯に配置しない教科チェック（学年単位）
       if ((rules?.simultaneousForbiddenSubjects || []).includes(lesson.subject)) {
         const grade = classes.find(c => c.id === classId)?.grade;
-        if (grade !== undefined) {
+        if (grade != null) {
           const conflictCount = countSimultaneousForbiddenInGrade(
             grade, dayId, Number(period), classId, placements, lessons, classes, rules
           );
@@ -378,7 +386,7 @@ function scoreCandidate({ lesson, classId, grade, dayId, period, placements, les
   if (sameDaySub) score -= 300;
 
   // 同じ時間帯に配置しない教科（学年単位）
-  if ((rules?.simultaneousForbiddenSubjects || []).includes(lesson.subject) && grade !== undefined) {
+  if ((rules?.simultaneousForbiddenSubjects || []).includes(lesson.subject) && grade != null) {
     const conflictCount = countSimultaneousForbiddenInGrade(grade, dayId, period, classId, placements, lessons, classes, rules);
     if (conflictCount > 0) score -= 250;
   }
@@ -588,11 +596,11 @@ export default function TimetableApp() {
     return cols;
   }, [days]);
 
-  // 学年グループ
+  // 学年グループ（学年を持たない特別支援学級は MIXED_GRADE_KEY にまとめる）
   const gradeGroups = useMemo(() => {
     const groups = {};
     for (const cls of classes) {
-      const g = cls.grade;
+      const g = cls.grade == null ? MIXED_GRADE_KEY : cls.grade;
       if (!groups[g]) groups[g] = [];
       groups[g].push(cls);
     }
@@ -1300,8 +1308,12 @@ function ClassGridView({
         ))}
       </div>
 
-      {/* 学年グループ */}
-      {Object.entries(gradeGroups).sort((a, b) => Number(a[0]) - Number(b[0])).map(([grade, gradeClasses]) => (
+      {/* 学年グループ（学年混合＝特別支援学級は最後に表示） */}
+      {Object.entries(gradeGroups).sort((a, b) => {
+        const av = a[0] === MIXED_GRADE_KEY ? Infinity : Number(a[0]);
+        const bv = b[0] === MIXED_GRADE_KEY ? Infinity : Number(b[0]);
+        return av - bv;
+      }).map(([grade, gradeClasses]) => (
         <div key={grade}>
           {/* 学年ヘッダー */}
           <div
@@ -1312,7 +1324,7 @@ function ClassGridView({
               borderTop: "1px solid #334155", fontSize: 12, fontWeight: 700, color: "#38bdf8",
             }}
           >
-            {collapsedGrades[grade] ? "▶" : "▼"} {grade}年
+            {collapsedGrades[grade] ? "▶" : "▼"} {grade === MIXED_GRADE_KEY ? "特別支援" : `${grade}年`}
           </div>
 
           {/* 学級行 */}
@@ -1630,7 +1642,7 @@ function ClassPanel({ classes, setClasses, newClass, setNewClass }) {
           <div style={{ flex: 1 }}>
             <span style={{ fontWeight: 700, fontSize: 12 }}>{cls.name}</span>
             <span style={{ fontSize: 10, color: "#64748b", marginLeft: 6 }}>
-              {cls.grade}年 / {cls.type === "normal" ? "通常" : cls.type === "special" ? "生活" : "交流"}
+              {cls.grade != null ? `${cls.grade}年` : "特別支援"} / {cls.type === "normal" ? "通常" : cls.type === "special" ? "特支" : "交流"}
             </span>
           </div>
           <button onClick={() => setClasses(prev => prev.filter(c => c.id !== cls.id))}
@@ -1642,19 +1654,30 @@ function ClassPanel({ classes, setClasses, newClass, setNewClass }) {
         <h4 style={{ color: "#94a3b8", fontSize: 11, marginBottom: 8 }}>学級を追加</h4>
         <input value={newClass.name} onChange={e => setNewClass(p => ({ ...p, name: e.target.value }))}
           placeholder="学級名（例: 1-4）" style={inputStyle} />
-        <select value={newClass.grade} onChange={e => setNewClass(p => ({ ...p, grade: Number(e.target.value) }))}
-          style={{ ...inputStyle, marginTop: 4 }}>
-          {[1, 2, 3, 4, 5, 6].map(g => <option key={g} value={g}>{g}年</option>)}
-        </select>
         <select value={newClass.type} onChange={e => setNewClass(p => ({ ...p, type: e.target.value }))}
           style={{ ...inputStyle, marginTop: 4 }}>
           <option value="normal">通常</option>
-          <option value="special">生活</option>
+          <option value="special">特支</option>
           <option value="exchange">交流</option>
         </select>
+        {newClass.type === "special" ? (
+          <p style={{ fontSize: 10, color: "#64748b", marginTop: 6 }}>
+            特支は学年をまたぐことがあるため、学年は設定しません（時間割グリッドの「特別支援」に表示されます）。
+          </p>
+        ) : (
+          <select value={newClass.grade} onChange={e => setNewClass(p => ({ ...p, grade: Number(e.target.value) }))}
+            style={{ ...inputStyle, marginTop: 4 }}>
+            {[1, 2, 3, 4, 5, 6].map(g => <option key={g} value={g}>{g}年</option>)}
+          </select>
+        )}
         <button onClick={() => {
           if (!newClass.name.trim()) return;
-          setClasses(prev => [...prev, { id: generateId(), ...newClass }]);
+          const toAdd = {
+            id: generateId(),
+            ...newClass,
+            grade: newClass.type === "special" ? null : newClass.grade,
+          };
+          setClasses(prev => [...prev, toAdd].sort((a, b) => gradeSortValue(a.grade) - gradeSortValue(b.grade)));
           setNewClass({ name: "", grade: 1, type: "normal", parentId: null });
         }} style={{ ...btnStyle, marginTop: 6, width: "100%" }}>
           追加
@@ -1889,7 +1912,7 @@ function PeriodMultiPicker({ maxPeriod, values, onChange }) {
 
 function PlacementRulesPanel({ rules, setRules, classes, days }) {
   const maxPeriod = Math.max(6, ...days.map(d => d.periods));
-  const grades = [...new Set(classes.map(c => c.grade))].sort((a, b) => a - b);
+  const grades = [...new Set(classes.map(c => c.grade).filter(g => g != null))].sort((a, b) => a - b);
 
   const updateRules = (patch) => setRules(prev => ({ ...prev, ...patch }));
 
@@ -2126,6 +2149,7 @@ function ManualPanel() {
   const sections = [
     ["start", "はじめに"],
     ["setup", "初期設定"],
+    ["special_needs", "特別支援学級について"],
     ["lesson", "授業作成"],
     ["fixed", "固定コマ"],
     ["auto", "自動生成"],
@@ -2175,6 +2199,35 @@ function ManualPanel() {
 ## 4. 会議設定
 「📋 会議」をクリックし、定例会議を登録します。
 登録した会議コマには教員が配置されないよう自動生成が制御されます。
+    `,
+    special_needs: `
+# 特別支援学級について
+
+特別支援学級の授業には大きく分けて2つのパターンがあるため、
+学級の「種別」を使い分けて登録します。
+
+## 1. 特別支援学級のみで行う授業（自立・作業・生単など）
+学級の種別を **「特支」** にして登録します。
+特支学級は学年をまたいで編成されることが多いため、
+学級追加時に学年の指定は不要です（学年選択欄が表示されません）。
+
+特支学級の授業は、通常の学級と同じように「授業を作成」→
+対象クラスに特支学級を選ぶだけで配置できます。
+
+## 2. 親学級と合同で行う授業（技能教科など）
+交流学級を **学年ごとに** 作成します。種別は **「交流」** にし、
+学年を指定してください。
+例：「特支1（1年）」「特支1（2年）」のように、学年ごとに別の交流学級を作ります。
+
+授業を作成する際、「対象クラス」で **親学級と対応する交流学級の両方**
+にチェックを入れ、「選択クラスを同じ時間に配置（合同授業）」にチェックを
+入れて保存します。これで自動生成時に、親学級と交流学級が同じコマへ
+配置されるようになります。
+
+## 時間割グリッドでの表示
+特支学級（学年を指定していない学級）は、時間割表の一番下に
+「特別支援」というセクションでまとめて表示されます。
+交流学級は指定した学年のセクションに、通常の学級と並んで表示されます。
     `,
     lesson: `
 # 授業の作成
