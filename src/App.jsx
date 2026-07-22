@@ -65,6 +65,11 @@ function gradeSortValue(grade) {
   return grade == null ? Infinity : grade;
 }
 
+// 学年を設定しない学級種別（特支・交流はどちらも学年をまたぐ運用がありうるため）
+function isGradelessClassType(type) {
+  return type === "special" || type === "exchange";
+}
+
 const CONSECUTIVE_LIMIT_OPTIONS = [
   { value: "none", label: "制限なし" },
   { value: "max2", label: "最大2時間" },
@@ -1660,9 +1665,11 @@ function ClassPanel({ classes, setClasses, newClass, setNewClass }) {
           <option value="special">特支</option>
           <option value="exchange">交流</option>
         </select>
-        {newClass.type === "special" ? (
+        {isGradelessClassType(newClass.type) ? (
           <p style={{ fontSize: 10, color: "#64748b", marginTop: 6 }}>
-            特支は学年をまたぐことがあるため、学年は設定しません（時間割グリッドの「特別支援」に表示されます）。
+            {newClass.type === "special"
+              ? "特支は学年をまたぐことがあるため、学年は設定しません（時間割グリッドの「特別支援」に表示されます）。"
+              : "交流学級は学年を設定しません（学級名に学年を含めてください。例: 特支1（1年）／時間割グリッドの「特別支援」に表示されます）。"}
           </p>
         ) : (
           <select value={newClass.grade} onChange={e => setNewClass(p => ({ ...p, grade: Number(e.target.value) }))}
@@ -1675,7 +1682,7 @@ function ClassPanel({ classes, setClasses, newClass, setNewClass }) {
           const toAdd = {
             id: generateId(),
             ...newClass,
-            grade: newClass.type === "special" ? null : newClass.grade,
+            grade: isGradelessClassType(newClass.type) ? null : newClass.grade,
           };
           setClasses(prev => [...prev, toAdd].sort((a, b) => gradeSortValue(a.grade) - gradeSortValue(b.grade)));
           setNewClass({ name: "", grade: 1, type: "normal", parentId: null });
@@ -2215,9 +2222,12 @@ function ManualPanel() {
 対象クラスに特支学級を選ぶだけで配置できます。
 
 ## 2. 親学級と合同で行う授業（技能教科など）
-交流学級を **学年ごとに** 作成します。種別は **「交流」** にし、
-学年を指定してください。
-例：「特支1（1年）」「特支1（2年）」のように、学年ごとに別の交流学級を作ります。
+交流学級を作成します。種別は **「交流」** にしてください。
+交流学級も特支学級と同様、学年をまたいで運用されることがあるため
+学年の指定は不要です（学年選択欄は表示されません）。
+学年を区別したい場合は学級名に含めてください。
+例：「特支1（1年）」「特支1（2年）」のように、対応する学年ごとに
+別の交流学級を作ります。
 
 授業を作成する際、「対象クラス」で **親学級と対応する交流学級の両方**
 にチェックを入れ、「選択クラスを同じ時間に配置（合同授業）」にチェックを
@@ -2225,9 +2235,8 @@ function ManualPanel() {
 配置されるようになります。
 
 ## 時間割グリッドでの表示
-特支学級（学年を指定していない学級）は、時間割表の一番下に
-「特別支援」というセクションでまとめて表示されます。
-交流学級は指定した学年のセクションに、通常の学級と並んで表示されます。
+特支学級・交流学級（どちらも学年を指定していない学級）は、
+時間割表の一番下に「特別支援」というセクションでまとめて表示されます。
     `,
     lesson: `
 # 授業の作成
