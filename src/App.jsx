@@ -956,6 +956,37 @@ export default function TimetableApp() {
     showToast("授業を削除しました", "info");
   };
 
+  // 学年単位で固定する教科（学活・道徳・総合）向け：まだ授業がない学級に
+  // その学級の担任を担当教員として自動で授業を作成する
+  const bulkCreateHomeroomLessons = (subject, grade) => {
+    const gradeClasses = classes.filter(c => c.grade === grade);
+    const newLessons = [];
+    let skipped = 0;
+    let missingHomeroom = 0;
+    for (const cls of gradeClasses) {
+      const exists = lessons.some(l => l.subject === subject && (l.classIds || []).includes(cls.id));
+      if (exists) { skipped++; continue; }
+      const homeroomTeacher = teachers.find(t => t.homeroom === cls.id);
+      if (!homeroomTeacher) missingHomeroom++;
+      newLessons.push({
+        id: generateId(),
+        subject,
+        classIds: [cls.id],
+        teacherId: homeroomTeacher ? homeroomTeacher.id : null,
+        subTeacherIds: [],
+        weeklyHours: 1,
+        simultaneous: false,
+      });
+    }
+    if (newLessons.length > 0) {
+      setLessons(prev => [...prev, ...newLessons]);
+    }
+    const parts = [`${newLessons.length}件作成`];
+    if (skipped > 0) parts.push(`${skipped}件は既存のためスキップ`);
+    if (missingHomeroom > 0) parts.push(`${missingHomeroom}件は学級担任未設定のため担当教員は未定のまま`);
+    showToast(`${subject}（${grade}年）: ${parts.join("、")}`, newLessons.length > 0 ? "success" : "info");
+  };
+
   // 教員ビューのグリッド
   const teacherGrid = useMemo(() => {
     if (view !== "teacher") return null;
@@ -1281,6 +1312,8 @@ export default function TimetableApp() {
                 <PlacementRulesPanel
                   rules={placementRules} setRules={setPlacementRules}
                   classes={classes} days={days}
+                  lessons={lessons}
+                  onBulkCreateHomeroomLessons={bulkCreateHomeroomLessons}
                 />
               )}
               {rightPanel === "manual" && <ManualPanel />}
@@ -2091,7 +2124,7 @@ function PeriodMultiPicker({ maxPeriod, values, onChange }) {
   );
 }
 
-function PlacementRulesPanel({ rules, setRules, classes, days }) {
+function PlacementRulesPanel({ rules, setRules, classes, days, lessons, onBulkCreateHomeroomLessons }) {
   const maxPeriod = Math.max(6, ...days.map(d => d.periods));
   const grades = [...new Set(classes.map(c => c.grade).filter(g => g != null))].sort((a, b) => a - b);
 
@@ -2186,21 +2219,41 @@ function PlacementRulesPanel({ rules, setRules, classes, days }) {
                 />
                 {subject}
               </label>
-              {conf.enabled && grades.map(grade => (
-                <div key={grade} style={{ marginBottom: 6, paddingLeft: 8 }}>
-                  <div style={{ fontSize: 10, color: "#64748b", marginBottom: 2 }}>{grade}年</div>
-                  <SingleSlotPicker
-                    days={days}
-                    value={conf.perGrade[grade] || null}
-                    onChange={slot => updateRules({
-                      gradeFixedSubjects: {
-                        ...rules.gradeFixedSubjects,
-                        [subject]: { ...conf, perGrade: { ...conf.perGrade, [grade]: slot } }
-                      }
-                    })}
-                  />
-                </div>
-              ))}
+              {conf.enabled && grades.map(grade => {
+                const slot = conf.perGrade[grade] || null;
+                const gradeClasses = classes.filter(c => c.grade === grade);
+                const withLesson = gradeClasses.filter(c =>
+                  lessons.some(l => l.subject === subject && (l.classIds || []).includes(c.id))
+                ).length;
+                return (
+                  <div key={grade} style={{ marginBottom: 6, paddingLeft: 8 }}>
+                    <div style={{ fontSize: 10, color: "#64748b", marginBottom: 2 }}>{grade}年</div>
+                    <SingleSlotPicker
+                      days={days}
+                      value={slot}
+                      onChange={newSlot => updateRules({
+                        gradeFixedSubjects: {
+                          ...rules.gradeFixedSubjects,
+                          [subject]: { ...conf, perGrade: { ...conf.perGrade, [grade]: newSlot } }
+                        }
+                      })}
+                    />
+                    {slot && (
+                      <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ fontSize: 10, color: "#64748b" }}>
+                          授業が設定済みの学級: {withLesson}/{gradeClasses.length}
+                        </span>
+                        <button onClick={() => onBulkCreateHomeroomLessons(subject, grade)} style={{
+                          fontSize: 10, padding: "2px 6px", borderRadius: 4, border: "1px solid #38bdf844",
+                          background: "#38bdf811", color: "#38bdf8", cursor: "pointer",
+                        }}>
+                          学級担任で不足分を自動作成
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           );
         })}
@@ -2504,6 +2557,14 @@ ONにすると、同じクラス・同じ日に同じ教科を2回配置する�
 学活・道徳・総合について、学年ごとに固定するコマ（例：火曜5限）を指定できます。
 指定すると、自動生成時にその学年の全クラスへ自動的に同じコマへ配置されます。
 学年ごとに別々のコマを設定できます。
+
+これらの教科は「学年全体で同じ時間に、各クラスはそれぞれの学級担任が
+担当する」という運用が一般的です。コマを指定すると「学級担任で不足分を
+自動作成」ボタンが表示され、クリックするとその学年でまだ授業が
+登録されていない学級について、学級担任（教員一覧で「担任クラス」に
+設定した教員）を担当教員とする授業が自動で作成されます（週時数1）。
+すでに授業がある学級はスキップされ、上書きされません。担任が未設定の
+学級は担当教員「未定」で作成されるので、後から手動で設定してください。
 
 ## バランス調整：主要5教科を均等配置する
 国語・数学・英語・理科・社会が特定の曜日に偏らないよう、自動生成時に
