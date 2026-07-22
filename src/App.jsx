@@ -928,6 +928,7 @@ export default function TimetableApp() {
       subTeacherIds: [],
       weeklyHours: 3,
       simultaneous: false,
+      assignMode: "subject", // "subject": 教科担当を1人指定 / "homeroom": クラスごとに学級担任を自動割当
     };
     setEditLesson(newLesson);
     setRightPanel("lesson");
@@ -935,6 +936,51 @@ export default function TimetableApp() {
 
   const saveLesson = () => {
     if (!editLesson) return;
+
+    if (editLesson.assignMode === "homeroom") {
+      const targetClassIds = editLesson.classIds || [];
+      if (targetClassIds.length === 0) {
+        showToast("対象クラスを選択してください", "error");
+        return;
+      }
+      const isExisting = lessons.some(l => l.id === editLesson.id);
+      const created = targetClassIds.map(cid => {
+        const homeroomTeacher = teachers.find(t => t.homeroom === cid);
+        return {
+          id: generateId(),
+          subject: editLesson.subject,
+          classIds: [cid],
+          teacherId: homeroomTeacher ? homeroomTeacher.id : null,
+          subTeacherIds: [],
+          weeklyHours: editLesson.weeklyHours || 1,
+          simultaneous: false,
+          assignMode: "homeroom",
+        };
+      });
+
+      if (isExisting) {
+        // 元の授業（編集前）はコマからも含めて削除し、クラスごとの授業に置き換える
+        setLessons(prev => [...prev.filter(l => l.id !== editLesson.id), ...created]);
+        setPlacements(prev => {
+          const newP = { ...prev };
+          for (const key of Object.keys(newP)) {
+            newP[key] = (newP[key] || []).filter(id => id !== editLesson.id);
+          }
+          return newP;
+        });
+      } else {
+        setLessons(prev => [...prev, ...created]);
+      }
+
+      setEditLesson(null);
+      const missing = created.filter(l => !l.teacherId).length;
+      showToast(
+        `${editLesson.subject}: ${created.length}件の授業を学級担任で作成しました${missing > 0 ? `（${missing}件は担任未設定のため未定）` : ""}`,
+        "success"
+      );
+      return;
+    }
+
     const toSave = withAutoLinkedExchangeClasses(editLesson, classes);
     if (lessons.find(l => l.id === toSave.id)) {
       setLessons(prev => prev.map(l => l.id === toSave.id ? toSave : l));
@@ -1933,35 +1979,74 @@ function LessonPanel({ lesson, setLesson, teachers, classes, onSave, onDelete })
         </div>
       </FormRow>
 
-      <FormRow label="担当教員">
-        <select value={lesson.teacherId || ""} onChange={e => setLesson(p => ({ ...p, teacherId: e.target.value }))}
-          style={inputStyle}>
-          <option value="">未定</option>
-          {teachers.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-        </select>
+      <FormRow label="教員の割り当て方法">
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 11 }}>
+            <input type="radio" name="assignMode" checked={(lesson.assignMode || "subject") === "subject"}
+              onChange={() => setLesson(p => ({ ...p, assignMode: "subject" }))} />
+            教科担当を指定（対象クラス共通の教員を1人選ぶ）
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 11 }}>
+            <input type="radio" name="assignMode" checked={lesson.assignMode === "homeroom"}
+              onChange={() => setLesson(p => ({ ...p, assignMode: "homeroom" }))} />
+            各クラスの学級担任に割り振る（クラスごとに別々の授業を作成）
+          </label>
+        </div>
       </FormRow>
 
-      <FormRow label="副担当教員">
-        <select value={lesson.subTeacherIds?.[0] || ""} onChange={e => setLesson(p => ({
-          ...p, subTeacherIds: e.target.value ? [e.target.value] : []
-        }))} style={inputStyle}>
-          <option value="">なし</option>
-          {teachers.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-        </select>
-      </FormRow>
+      {lesson.assignMode === "homeroom" ? (
+        <FormRow label="学級担任プレビュー">
+          <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+            {(lesson.classIds || []).length === 0 && (
+              <p style={{ fontSize: 10, color: "#475569" }}>対象クラスを選択してください</p>
+            )}
+            {(lesson.classIds || []).map(cid => {
+              const cls = classes.find(c => c.id === cid);
+              const t = teachers.find(t => t.homeroom === cid);
+              return (
+                <div key={cid} style={{ fontSize: 11, color: "#94a3b8" }}>
+                  {cls?.name || cid} → {t ? t.name : <span style={{ color: "#f59e0b" }}>担任未設定（未定）</span>}
+                </div>
+              );
+            })}
+            <p style={{ fontSize: 10, color: "#64748b", marginTop: 4 }}>
+              保存すると、対象クラスごとに独立した授業（週時数は共通）が自動作成されます。
+            </p>
+          </div>
+        </FormRow>
+      ) : (
+        <>
+          <FormRow label="担当教員">
+            <select value={lesson.teacherId || ""} onChange={e => setLesson(p => ({ ...p, teacherId: e.target.value }))}
+              style={inputStyle}>
+              <option value="">未定</option>
+              {teachers.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          </FormRow>
+
+          <FormRow label="副担当教員">
+            <select value={lesson.subTeacherIds?.[0] || ""} onChange={e => setLesson(p => ({
+              ...p, subTeacherIds: e.target.value ? [e.target.value] : []
+            }))} style={inputStyle}>
+              <option value="">なし</option>
+              {teachers.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          </FormRow>
+
+          <FormRow label="配置方法">
+            <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+              <input type="checkbox" checked={lesson.simultaneous || false}
+                onChange={e => setLesson(p => ({ ...p, simultaneous: e.target.checked }))} />
+              <span style={{ fontSize: 11 }}>選択クラスを同じ時間に配置（合同授業）</span>
+            </label>
+          </FormRow>
+        </>
+      )}
 
       <FormRow label="週時数">
         <input type="number" min={1} max={10} value={lesson.weeklyHours || 1}
           onChange={e => setLesson(p => ({ ...p, weeklyHours: Number(e.target.value) }))}
           style={{ ...inputStyle, width: 60 }} />
-      </FormRow>
-
-      <FormRow label="配置方法">
-        <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
-          <input type="checkbox" checked={lesson.simultaneous || false}
-            onChange={e => setLesson(p => ({ ...p, simultaneous: e.target.checked }))} />
-          <span style={{ fontSize: 11 }}>選択クラスを同じ時間に配置（合同授業）</span>
-        </label>
       </FormRow>
 
       <div style={{ display: "flex", gap: 6, marginTop: 16 }}>
@@ -2492,6 +2577,22 @@ function ManualPanel() {
 ## 道徳・学活の一括設定
 対象クラス全選択 → 同時配置にチェック → 週時数1
 → 自動生成で同じ時間に配置されます
+
+## 教員の割り当て方法（教科担当／学級担任）
+授業作成画面には「教員の割り当て方法」があり、どの教科でも選べます。
+
+- **教科担当を指定**：対象クラス共通で1人の教員を担当教員に設定します
+  （従来どおりの方法）。
+- **各クラスの学級担任に割り振る**：対象クラスを選ぶと、クラスごとに
+  「学級担任プレビュー」が表示されます。保存すると、選んだクラスの数だけ
+  独立した授業（クラスごとの担任が自動セット、週時数は共通）が一括で
+  作成されます。担任が未設定のクラスは担当教員「未定」になります。
+
+道徳・学活・総合のように「学年全体で同じ時間に、クラスごとに学級担任が
+担当する」授業を作りたいときは、この「学級担任に割り振る」を使うと
+1クラスずつ手作業で授業を作る必要がなくなります。同じ時間に揃えたい
+場合は、あわせて「⚙ 自動配置条件」の「学年単位で固定する教科」でコマを
+指定してください（詳しくは「自動配置条件（Ver1.2）」の項目を参照）。
     `,
     fixed: `
 # 固定コマの設定
