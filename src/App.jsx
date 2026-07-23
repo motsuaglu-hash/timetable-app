@@ -135,6 +135,14 @@ function mergePlacementRules(saved) {
       perGrade: {},
       ...(saved.gradeFixedSubjects?.[subject] || {}),
     };
+    // perGrade[grade] は複数コマ（配列）を持てる。旧形式（単一オブジェクト）を配列へ変換する
+    const perGrade = merged.gradeFixedSubjects[subject].perGrade || {};
+    const normalizedPerGrade = {};
+    for (const [grade, value] of Object.entries(perGrade)) {
+      if (!value) { normalizedPerGrade[grade] = []; continue; }
+      normalizedPerGrade[grade] = Array.isArray(value) ? value : [value];
+    }
+    merged.gradeFixedSubjects[subject].perGrade = normalizedPerGrade;
   }
   return merged;
 }
@@ -164,6 +172,34 @@ function countLessonSlotInstances(lessonId, placements) {
     slots.add(`${parts[1]}__${parts[2]}`);
   }
   return slots.size;
+}
+
+// 特定クラスに、指定した授業が何コマ配置されているかを数える
+function countLessonPlacedForClass(lessonId, classId, placements) {
+  let count = 0;
+  for (const [k, ids] of Object.entries(placements)) {
+    if (k.split("__")[0] !== classId) continue;
+    if ((ids || []).includes(lessonId)) count++;
+  }
+  return count;
+}
+
+// 授業が必要とする週あたりの合計配置数。
+// 合同授業（simultaneous かつ対象クラス複数）は対象クラス共通で weeklyHours 分。
+// それ以外（対象クラス1つ、または非合同で複数クラス）は「クラスごとに weeklyHours」を必要とする。
+function getLessonRequiredTotal(lesson) {
+  const classCount = (lesson.classIds || []).filter(Boolean).length;
+  if (lesson.simultaneous && classCount > 1) return lesson.weeklyHours || 1;
+  return (lesson.weeklyHours || 1) * Math.max(classCount, 1);
+}
+
+// 授業が実際に配置されている合計数（getLessonRequiredTotal と対になる数え方）
+function getLessonPlacedTotal(lesson, placements) {
+  const classIds = (lesson.classIds || []).filter(Boolean);
+  if (lesson.simultaneous && classIds.length > 1) {
+    return countLessonSlotInstances(lesson.id, placements);
+  }
+  return Object.values(placements).flat().filter(id => id === lesson.id).length;
 }
 
 // 特定教員が指定コマにすでに配置されているか（クラス問わず全体で判定）
@@ -466,20 +502,23 @@ function autoGenerate(lessons, placements, days, meetings, teachers, classes = [
   const newPlacements = { ...placements };
 
   // ④ 学年単位で固定する教科（学活・道徳・総合）を先に強制配置する
+  // 1つの学年・教科に対して複数コマ（週複数時間）を設定できる。
   for (const subject of GRADE_FIXABLE_SUBJECTS) {
     const conf = effectiveRules.gradeFixedSubjects?.[subject];
     if (!conf?.enabled) continue;
-    for (const [gradeStr, slot] of Object.entries(conf.perGrade || {})) {
-      if (!slot) continue;
+    for (const [gradeStr, slots] of Object.entries(conf.perGrade || {})) {
+      if (!slots || slots.length === 0) continue;
       const grade = Number(gradeStr);
       for (const cls of classes.filter(c => c.grade === grade)) {
-        const key = `${cls.id}__${slot.dayId}__${slot.period}`;
-        if (newPlacements[key]?.length > 0) continue; // 既に何か入っていれば上書きしない
         const lesson = lessons.find(l => l.subject === subject && (l.classIds || []).includes(cls.id));
         if (!lesson) continue;
-        const placedCount = countLessonSlotInstances(lesson.id, newPlacements);
-        if (placedCount >= (lesson.weeklyHours || 1)) continue;
-        newPlacements[key] = [...(newPlacements[key] || []), lesson.id];
+        for (const slot of slots) {
+          const key = `${cls.id}__${slot.dayId}__${slot.period}`;
+          if (newPlacements[key]?.length > 0) continue; // 既に何か入っていれば上書きしない
+          const placedCount = countLessonPlacedForClass(lesson.id, cls.id, newPlacements);
+          if (placedCount >= (lesson.weeklyHours || 1)) break; // このクラスは必要数を満たした
+          newPlacements[key] = [...(newPlacements[key] || []), lesson.id];
+        }
       }
     }
   }
@@ -487,15 +526,26 @@ function autoGenerate(lessons, placements, days, meetings, teachers, classes = [
   // 配置対象授業（既存の配置コマ数はここでは固定/非固定を問わず既に埋まっているコマとして扱う。
   // 自動生成は空きコマにしか配置しないため、固定コマは自然にそのまま残る）
   // 合同授業（simultaneous かつ対象クラスが複数）は、1インスタンス＝全対象クラスへの同時配置として扱う。
+  // それ以外で対象クラスが複数選ばれている場合は、クラスごとに独立してweeklyHours分ずつ配置する。
   const targets = [];
   for (const lesson of lessons) {
     const classIds = (lesson.classIds || []).filter(Boolean);
     if (classIds.length === 0) continue;
-    const placed = countLessonSlotInstances(lesson.id, newPlacements);
-    const remaining = (lesson.weeklyHours || 1) - placed;
-    const targetClassIds = lesson.simultaneous && classIds.length > 1 ? classIds : [classIds[0]];
-    for (let i = 0; i < remaining; i++) {
-      targets.push({ lesson, classIds: targetClassIds });
+
+    if (lesson.simultaneous && classIds.length > 1) {
+      const placed = countLessonSlotInstances(lesson.id, newPlacements);
+      const remaining = (lesson.weeklyHours || 1) - placed;
+      for (let i = 0; i < remaining; i++) {
+        targets.push({ lesson, classIds });
+      }
+    } else {
+      for (const cid of classIds) {
+        const placed = countLessonPlacedForClass(lesson.id, cid, newPlacements);
+        const remaining = (lesson.weeklyHours || 1) - placed;
+        for (let i = 0; i < remaining; i++) {
+          targets.push({ lesson, classIds: [cid] });
+        }
+      }
     }
   }
 
@@ -606,8 +656,10 @@ export default function TimetableApp() {
 
   // 授業の配置済み数を計算
   const getPlacedCount = useCallback((lessonId) => {
-    return countLessonSlotInstances(lessonId, placements);
-  }, [placements]);
+    const lesson = lessons.find(l => l.id === lessonId);
+    if (!lesson) return 0;
+    return getLessonPlacedTotal(lesson, placements);
+  }, [placements, lessons]);
 
   // 特定のコマ内の配置が固定されているか（固定はコマ単位）
   const isFixed = useCallback((cellKey, lessonId) => {
@@ -626,7 +678,7 @@ export default function TimetableApp() {
   const paletteItems = useMemo(() => {
     return lessons.filter(l => {
       const placed = getPlacedCount(l.id);
-      const remaining = (l.weeklyHours || 1) - placed;
+      const remaining = getLessonRequiredTotal(l) - placed;
       const hasError = errors.some(e => e.lessonId === l.id);
 
       if (paletteFilter === "unplaced" && remaining <= 0) return false;
@@ -923,7 +975,7 @@ export default function TimetableApp() {
     const newLesson = {
       id: generateId(),
       subject: "国語",
-      classIds: classes.length > 0 ? [classes[0].id] : [],
+      classIds: [],
       teacherId: teachers.length > 0 ? teachers[0].id : null,
       subTeacherIds: [],
       weeklyHours: 3,
@@ -1004,7 +1056,7 @@ export default function TimetableApp() {
 
   // 学年単位で固定する教科（学活・道徳・総合）向け：まだ授業がない学級に
   // その学級の担任を担当教員として自動で授業を作成する
-  const bulkCreateHomeroomLessons = (subject, grade) => {
+  const bulkCreateHomeroomLessons = (subject, grade, weeklyHours = 1) => {
     const gradeClasses = classes.filter(c => c.grade === grade);
     const newLessons = [];
     let skipped = 0;
@@ -1020,7 +1072,7 @@ export default function TimetableApp() {
         classIds: [cls.id],
         teacherId: homeroomTeacher ? homeroomTeacher.id : null,
         subTeacherIds: [],
-        weeklyHours: 1,
+        weeklyHours: Math.max(1, weeklyHours || 1),
         simultaneous: false,
       });
     }
@@ -1159,6 +1211,7 @@ export default function TimetableApp() {
         {[
           ["teachers", "👨‍🏫 教員"],
           ["classes", "🏫 学級"],
+          ["lessonList", "📚 授業一覧"],
           ["meetings", "📋 会議"],
           ["days", "⏰ 時限"],
           ["placementRules", "⚙ 自動配置条件"],
@@ -1218,7 +1271,7 @@ export default function TimetableApp() {
             )}
             {paletteItems.map(lesson => {
               const placed = getPlacedCount(lesson.id);
-              const remaining = (lesson.weeklyHours || 1) - placed;
+              const remaining = getLessonRequiredTotal(lesson) - placed;
               const hasError = errors.some(e => e.lessonId === lesson.id);
               const teacher = teachers.find(t => t.id === lesson.teacherId);
               const color = SUBJECT_COLORS[lesson.subject] || "#94a3b8";
@@ -1312,6 +1365,7 @@ export default function TimetableApp() {
               <span style={{ fontWeight: 700 }}>
                 {rightPanel === "teachers" && "👨‍🏫 教員一覧"}
                 {rightPanel === "classes" && "🏫 学級一覧"}
+                {rightPanel === "lessonList" && "📚 授業一覧"}
                 {rightPanel === "lesson" && "📝 授業編集"}
                 {rightPanel === "meetings" && "📋 会議設定"}
                 {rightPanel === "days" && "⏰ 曜日・時限設定"}
@@ -1335,6 +1389,13 @@ export default function TimetableApp() {
                 <ClassPanel
                   classes={classes} setClasses={setClasses}
                   newClass={newClass} setNewClass={setNewClass}
+                />
+              )}
+              {rightPanel === "lessonList" && (
+                <LessonListPanel
+                  lessons={lessons} classes={classes} teachers={teachers} placements={placements}
+                  onEditLesson={l => { setEditLesson({ ...l }); setRightPanel("lesson"); }}
+                  onDeleteLesson={deleteLesson}
                 />
               )}
               {rightPanel === "lesson" && editLesson && (
@@ -1387,7 +1448,7 @@ export default function TimetableApp() {
                   marginLeft: 4, background: "#f59e0b", color: "#0f172a",
                   borderRadius: 10, padding: "0 5px", fontSize: 10, fontWeight: 700,
                 }}>
-                  {lessons.reduce((acc, l) => acc + Math.max(0, (l.weeklyHours||1) - getPlacedCount(l.id)), 0)}
+                  {lessons.reduce((acc, l) => acc + Math.max(0, getLessonRequiredTotal(l) - getPlacedCount(l.id)), 0)}
                 </span>
               )}
               {t === "errors" && errors.length > 0 && (
@@ -1942,6 +2003,77 @@ function ClassPanel({ classes, setClasses, newClass, setNewClass }) {
   );
 }
 
+// 授業一覧：全授業を学年ごとにグルーピングして一括で確認できる画面
+function LessonListPanel({ lessons, classes, teachers, placements, onEditLesson, onDeleteLesson }) {
+  if (lessons.length === 0) {
+    return <p style={{ color: "#475569", fontSize: 12, padding: 4 }}>授業がまだありません</p>;
+  }
+
+  const groups = {};
+  for (const lesson of lessons) {
+    const firstClass = classes.find(c => c.id === (lesson.classIds || [])[0]);
+    const key = firstClass && firstClass.grade != null ? firstClass.grade : MIXED_GRADE_KEY;
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(lesson);
+  }
+
+  const sortedGrades = Object.entries(groups).sort((a, b) => {
+    const av = a[0] === MIXED_GRADE_KEY ? Infinity : Number(a[0]);
+    const bv = b[0] === MIXED_GRADE_KEY ? Infinity : Number(b[0]);
+    return av - bv;
+  });
+
+  return (
+    <div>
+      <h3 style={{ color: "#38bdf8", marginBottom: 12, fontSize: 13 }}>📚 授業一覧</h3>
+      {sortedGrades.map(([grade, gradeLessons]) => (
+        <div key={grade} style={{ marginBottom: 14 }}>
+          <div style={{ fontWeight: 700, fontSize: 12, color: "#38bdf8", marginBottom: 6 }}>
+            {grade === MIXED_GRADE_KEY ? "特別支援" : `${grade}年`}（{gradeLessons.length}件）
+          </div>
+          {gradeLessons.map(lesson => {
+            const classNames = (lesson.classIds || []).map(id => classes.find(c => c.id === id)?.name || id).join("・");
+            const teacher = teachers.find(t => t.id === lesson.teacherId);
+            const subTeacher = teachers.find(t => t.id === (lesson.subTeacherIds || [])[0]);
+            const placed = getLessonPlacedTotal(lesson, placements);
+            const required = getLessonRequiredTotal(lesson);
+            const color = SUBJECT_COLORS[lesson.subject] || "#94a3b8";
+            return (
+              <div key={lesson.id} style={{
+                background: "#0f172a", border: `1px solid ${color}44`, borderLeft: `3px solid ${color}`,
+                borderRadius: 6, padding: "6px 8px", marginBottom: 6,
+              }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontWeight: 700, fontSize: 12, color }}>
+                    {lesson.subject}
+                    {lesson.simultaneous && (lesson.classIds || []).length > 1 && (
+                      <span style={{ marginLeft: 4, fontSize: 9, color: "#38bdf8" }}>合同</span>
+                    )}
+                    {lesson.assignMode === "homeroom" && (
+                      <span style={{ marginLeft: 4, fontSize: 9, color: "#a78bfa" }}>学級担任</span>
+                    )}
+                  </span>
+                  <span style={{ fontSize: 10, fontWeight: 700, color: placed >= required ? "#22c55e" : "#f59e0b" }}>
+                    {placed}/{required}
+                  </span>
+                </div>
+                <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 2 }}>{classNames || "対象クラス未設定"}</div>
+                <div style={{ fontSize: 10, color: "#64748b" }}>
+                  {teacher ? teacher.name : "担当未定"}{subTeacher ? `・${subTeacher.name}` : ""} / 週{lesson.weeklyHours || 1}
+                </div>
+                <div style={{ display: "flex", gap: 4, marginTop: 4 }}>
+                  <button onClick={() => onEditLesson(lesson)} style={{ ...smallBtnStyle, flex: 1 }}>✏️ 編集</button>
+                  <button onClick={() => onDeleteLesson(lesson.id)} style={{ ...smallBtnStyle, color: "#ef4444" }}>🗑 削除</button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function LessonPanel({ lesson, setLesson, teachers, classes, onSave, onDelete }) {
   return (
     <div>
@@ -1955,27 +2087,62 @@ function LessonPanel({ lesson, setLesson, teachers, classes, onSave, onDelete })
       </FormRow>
 
       <FormRow label="対象クラス（複数可）">
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-          {classes.map(cls => {
-            const isAutoLinked = cls.type === "exchange"
-              && getLinkedExchangeClassIds(cls.parentId, lesson.subject, classes).includes(cls.id)
-              && (lesson.classIds || []).some(id => id !== cls.id && getLinkedExchangeClassIds(id, lesson.subject, classes).includes(cls.id));
-            return (
-              <label key={cls.id} style={{ display: "flex", alignItems: "center", gap: 3, cursor: "pointer" }}>
-                <input type="checkbox"
-                  checked={lesson.classIds?.includes(cls.id) || false}
-                  onChange={e => {
-                    const prev = lesson.classIds || [];
-                    const nextIds = e.target.checked ? [...prev, cls.id] : prev.filter(id => id !== cls.id);
-                    setLesson(p => withAutoLinkedExchangeClasses({ ...p, classIds: nextIds }, classes));
-                  }}
-                />
-                <span style={{ fontSize: 11 }}>
-                  {cls.name}{isAutoLinked && <span title="親学級の連携設定により自動追加されています" style={{ color: "#38bdf8" }}>（自動）</span>}
-                </span>
-              </label>
-            );
-          })}
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {(() => {
+            const groups = {};
+            for (const cls of classes) {
+              const key = cls.grade == null ? MIXED_GRADE_KEY : cls.grade;
+              if (!groups[key]) groups[key] = [];
+              groups[key].push(cls);
+            }
+            const sortedGrades = Object.entries(groups).sort((a, b) => {
+              const av = a[0] === MIXED_GRADE_KEY ? Infinity : Number(a[0]);
+              const bv = b[0] === MIXED_GRADE_KEY ? Infinity : Number(b[0]);
+              return av - bv;
+            });
+            return sortedGrades.map(([grade, gradeClasses]) => {
+              const gradeIds = gradeClasses.map(c => c.id);
+              const allSelected = gradeIds.every(id => (lesson.classIds || []).includes(id));
+              return (
+                <div key={grade}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 10, color: "#94a3b8", cursor: "pointer", marginBottom: 3 }}>
+                    <input type="checkbox" checked={allSelected}
+                      onChange={e => {
+                        const prev = lesson.classIds || [];
+                        const nextIds = e.target.checked
+                          ? [...new Set([...prev, ...gradeIds])]
+                          : prev.filter(id => !gradeIds.includes(id));
+                        setLesson(p => withAutoLinkedExchangeClasses({ ...p, classIds: nextIds }, classes));
+                      }}
+                    />
+                    {grade === MIXED_GRADE_KEY ? "特別支援" : `${grade}年`}を全選択
+                  </label>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4, paddingLeft: 14 }}>
+                    {gradeClasses.map(cls => {
+                      const isAutoLinked = cls.type === "exchange"
+                        && getLinkedExchangeClassIds(cls.parentId, lesson.subject, classes).includes(cls.id)
+                        && (lesson.classIds || []).some(id => id !== cls.id && getLinkedExchangeClassIds(id, lesson.subject, classes).includes(cls.id));
+                      return (
+                        <label key={cls.id} style={{ display: "flex", alignItems: "center", gap: 3, cursor: "pointer" }}>
+                          <input type="checkbox"
+                            checked={lesson.classIds?.includes(cls.id) || false}
+                            onChange={e => {
+                              const prev = lesson.classIds || [];
+                              const nextIds = e.target.checked ? [...prev, cls.id] : prev.filter(id => id !== cls.id);
+                              setLesson(p => withAutoLinkedExchangeClasses({ ...p, classIds: nextIds }, classes));
+                            }}
+                          />
+                          <span style={{ fontSize: 11 }}>
+                            {cls.name}{isAutoLinked && <span title="親学級の連携設定により自動追加されています" style={{ color: "#38bdf8" }}>（自動）</span>}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            });
+          })()}
         </div>
       </FormRow>
 
@@ -2170,11 +2337,21 @@ function CollapsibleSection({ title, children, defaultOpen = true }) {
 }
 
 // 学年固定用：曜日×時限から1コマだけ選ぶピッカー（選択中をもう一度押すと解除）
-function SingleSlotPicker({ days, value, onChange }) {
+// 曜日×時限から複数コマを選べるピッカー（週複数時間の学年固定教科向け）
+function SlotMultiPicker({ days, values, onChange }) {
+  const list = values || [];
+  const isSelected = (dayId, period) => list.some(s => s.dayId === dayId && s.period === period);
+  const toggle = (dayId, period) => {
+    if (isSelected(dayId, period)) {
+      onChange(list.filter(s => !(s.dayId === dayId && s.period === period)));
+    } else {
+      onChange([...list, { dayId, period }]);
+    }
+  };
   return (
     <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
       {days.map(day => Array.from({ length: day.periods }, (_, i) => i + 1).map(p => {
-        const selected = value && value.dayId === day.id && value.period === p;
+        const selected = isSelected(day.id, p);
         return (
           <label key={`${day.id}-${p}`} style={{
             display: "flex", alignItems: "center", gap: 2, fontSize: 10, cursor: "pointer",
@@ -2182,8 +2359,8 @@ function SingleSlotPicker({ days, value, onChange }) {
           }}>
             <input
               type="checkbox"
-              checked={!!selected}
-              onChange={() => onChange(selected ? null : { dayId: day.id, period: p })}
+              checked={selected}
+              onChange={() => toggle(day.id, p)}
             />
             {day.label}{p}
           </label>
@@ -2305,34 +2482,36 @@ function PlacementRulesPanel({ rules, setRules, classes, days, lessons, onBulkCr
                 {subject}
               </label>
               {conf.enabled && grades.map(grade => {
-                const slot = conf.perGrade[grade] || null;
+                const slots = conf.perGrade[grade] || [];
                 const gradeClasses = classes.filter(c => c.grade === grade);
                 const withLesson = gradeClasses.filter(c =>
                   lessons.some(l => l.subject === subject && (l.classIds || []).includes(c.id))
                 ).length;
                 return (
                   <div key={grade} style={{ marginBottom: 6, paddingLeft: 8 }}>
-                    <div style={{ fontSize: 10, color: "#64748b", marginBottom: 2 }}>{grade}年</div>
-                    <SingleSlotPicker
+                    <div style={{ fontSize: 10, color: "#64748b", marginBottom: 2 }}>
+                      {grade}年（週{slots.length}コマ設定中）
+                    </div>
+                    <SlotMultiPicker
                       days={days}
-                      value={slot}
-                      onChange={newSlot => updateRules({
+                      values={slots}
+                      onChange={newSlots => updateRules({
                         gradeFixedSubjects: {
                           ...rules.gradeFixedSubjects,
-                          [subject]: { ...conf, perGrade: { ...conf.perGrade, [grade]: newSlot } }
+                          [subject]: { ...conf, perGrade: { ...conf.perGrade, [grade]: newSlots } }
                         }
                       })}
                     />
-                    {slot && (
-                      <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 6 }}>
+                    {slots.length > 0 && (
+                      <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                         <span style={{ fontSize: 10, color: "#64748b" }}>
                           授業が設定済みの学級: {withLesson}/{gradeClasses.length}
                         </span>
-                        <button onClick={() => onBulkCreateHomeroomLessons(subject, grade)} style={{
+                        <button onClick={() => onBulkCreateHomeroomLessons(subject, grade, slots.length)} style={{
                           fontSize: 10, padding: "2px 6px", borderRadius: 4, border: "1px solid #38bdf844",
                           background: "#38bdf811", color: "#38bdf8", cursor: "pointer",
                         }}>
-                          学級担任で不足分を自動作成
+                          学級担任で不足分を自動作成（週{slots.length}）
                         </button>
                       </div>
                     )}
@@ -2362,7 +2541,7 @@ function PlacementRulesPanel({ rules, setRules, classes, days, lessons, onBulkCr
 function UnplacedPanel({ lessons, getPlacedCount, classes, teachers, unplacedReasons }) {
   const unplaced = lessons.filter(l => {
     const placed = getPlacedCount(l.id);
-    return placed < (l.weeklyHours || 1);
+    return placed < getLessonRequiredTotal(l);
   });
 
   if (unplaced.length === 0) {
@@ -2405,7 +2584,7 @@ function UnplacedPanel({ lessons, getPlacedCount, classes, teachers, unplacedRea
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
         {unplaced.map(l => {
         const placed = getPlacedCount(l.id);
-        const remaining = (l.weeklyHours || 1) - placed;
+        const remaining = getLessonRequiredTotal(l) - placed;
         const color = SUBJECT_COLORS[l.subject] || "#94a3b8";
         const classNames = (l.classIds || []).map(id => classes.find(c => c.id === id)?.name || id).join(", ");
         const teacher = teachers.find(t => t.id === l.teacherId);
@@ -2657,15 +2836,17 @@ ONにすると、同じクラス・同じ日に同じ教科を2回配置する�
 ## 学級条件：学年単位で固定する教科
 学活・道徳・総合について、学年ごとに固定するコマ（例：火曜5限）を指定できます。
 指定すると、自動生成時にその学年の全クラスへ自動的に同じコマへ配置されます。
-学年ごとに別々のコマを設定できます。
+学年ごとに別々のコマを設定でき、総合のように週2時間以上ある教科は
+複数のコマ（例：火曜5限と水曜3限）を選択できます。
 
 これらの教科は「学年全体で同じ時間に、各クラスはそれぞれの学級担任が
 担当する」という運用が一般的です。コマを指定すると「学級担任で不足分を
-自動作成」ボタンが表示され、クリックするとその学年でまだ授業が
+自動作成（週N）」ボタンが表示され、クリックするとその学年でまだ授業が
 登録されていない学級について、学級担任（教員一覧で「担任クラス」に
-設定した教員）を担当教員とする授業が自動で作成されます（週時数1）。
-すでに授業がある学級はスキップされ、上書きされません。担任が未設定の
-学級は担当教員「未定」で作成されるので、後から手動で設定してください。
+設定した教員）を担当教員とする授業が自動で作成されます（週時数は
+設定したコマ数と同じになります）。すでに授業がある学級はスキップされ、
+上書きされません。担任が未設定の学級は担当教員「未定」で作成されるので、
+後から手動で設定してください。
 
 ## バランス調整：主要5教科を均等配置する
 国語・数学・英語・理科・社会が特定の曜日に偏らないよう、自動生成時に
