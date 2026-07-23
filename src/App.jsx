@@ -1352,7 +1352,7 @@ export default function TimetableApp() {
         </div>
 
         {/* 右パネル */}
-        {rightPanel && (
+        {rightPanel && rightPanel !== "lessonList" && (
           <div style={{
             width: 340, flexShrink: 0, background: "#1e293b",
             borderLeft: "1px solid #334155", display: "flex", flexDirection: "column",
@@ -1365,7 +1365,6 @@ export default function TimetableApp() {
               <span style={{ fontWeight: 700 }}>
                 {rightPanel === "teachers" && "👨‍🏫 教員一覧"}
                 {rightPanel === "classes" && "🏫 学級一覧"}
-                {rightPanel === "lessonList" && "📚 授業一覧"}
                 {rightPanel === "lesson" && "📝 授業編集"}
                 {rightPanel === "meetings" && "📋 会議設定"}
                 {rightPanel === "days" && "⏰ 曜日・時限設定"}
@@ -1389,13 +1388,6 @@ export default function TimetableApp() {
                 <ClassPanel
                   classes={classes} setClasses={setClasses}
                   newClass={newClass} setNewClass={setNewClass}
-                />
-              )}
-              {rightPanel === "lessonList" && (
-                <LessonListPanel
-                  lessons={lessons} classes={classes} teachers={teachers} placements={placements}
-                  onEditLesson={l => { setEditLesson({ ...l }); setRightPanel("lesson"); }}
-                  onDeleteLesson={deleteLesson}
                 />
               )}
               {rightPanel === "lesson" && editLesson && (
@@ -1428,6 +1420,33 @@ export default function TimetableApp() {
           </div>
         )}
       </div>
+
+      {/* 授業一覧（全画面表示） */}
+      {rightPanel === "lessonList" && (
+        <div style={{
+          position: "fixed", inset: 0, background: "#0f172a", zIndex: 2000,
+          display: "flex", flexDirection: "column",
+        }}>
+          <div style={{
+            display: "flex", justifyContent: "space-between", alignItems: "center",
+            padding: "10px 16px", borderBottom: "1px solid #334155", flexShrink: 0,
+          }}>
+            <span style={{ fontWeight: 700, fontSize: 15, color: "#38bdf8" }}>📚 授業一覧</span>
+            <button onClick={() => setRightPanel(null)} style={{
+              background: "#1e293b", border: "1px solid #334155", color: "#e2e8f0",
+              cursor: "pointer", fontSize: 12, padding: "6px 12px", borderRadius: 6, fontWeight: 700,
+            }}>
+              ✕ 閉じる
+            </button>
+          </div>
+          <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+            <LessonListFullScreen
+              lessons={lessons} classes={classes} teachers={teachers} placements={placements}
+              onEditLesson={l => { setEditLesson({ ...l }); setRightPanel("lesson"); }}
+            />
+          </div>
+        </div>
+      )}
 
       {/* 下パネル */}
       <div style={{
@@ -2004,20 +2023,20 @@ function ClassPanel({ classes, setClasses, newClass, setNewClass }) {
 }
 
 // 授業一覧：全授業を学年ごとにグルーピングして一括で確認できる画面
-function LessonListPanel({ lessons, classes, teachers, placements, onEditLesson, onDeleteLesson }) {
-  if (lessons.length === 0) {
-    return <p style={{ color: "#475569", fontSize: 12, padding: 4 }}>授業がまだありません</p>;
+// 授業一覧（全画面表示）：学年→学級の順にカードを並べ、各学級にどの授業が
+// 設定されているかを一目で見渡せるようにする
+function LessonListFullScreen({ lessons, classes, teachers, placements, onEditLesson }) {
+  if (classes.length === 0) {
+    return <p style={{ color: "#475569", fontSize: 13 }}>学級が登録されていません</p>;
   }
 
-  const groups = {};
-  for (const lesson of lessons) {
-    const firstClass = classes.find(c => c.id === (lesson.classIds || [])[0]);
-    const key = firstClass && firstClass.grade != null ? firstClass.grade : MIXED_GRADE_KEY;
-    if (!groups[key]) groups[key] = [];
-    groups[key].push(lesson);
+  const gradeGroups = {};
+  for (const cls of classes) {
+    const key = cls.grade == null ? MIXED_GRADE_KEY : cls.grade;
+    if (!gradeGroups[key]) gradeGroups[key] = [];
+    gradeGroups[key].push(cls);
   }
-
-  const sortedGrades = Object.entries(groups).sort((a, b) => {
+  const sortedGrades = Object.entries(gradeGroups).sort((a, b) => {
     const av = a[0] === MIXED_GRADE_KEY ? Infinity : Number(a[0]);
     const bv = b[0] === MIXED_GRADE_KEY ? Infinity : Number(b[0]);
     return av - bv;
@@ -2025,49 +2044,63 @@ function LessonListPanel({ lessons, classes, teachers, placements, onEditLesson,
 
   return (
     <div>
-      <h3 style={{ color: "#38bdf8", marginBottom: 12, fontSize: 13 }}>📚 授業一覧</h3>
-      {sortedGrades.map(([grade, gradeLessons]) => (
-        <div key={grade} style={{ marginBottom: 14 }}>
-          <div style={{ fontWeight: 700, fontSize: 12, color: "#38bdf8", marginBottom: 6 }}>
-            {grade === MIXED_GRADE_KEY ? "特別支援" : `${grade}年`}（{gradeLessons.length}件）
+      {sortedGrades.map(([grade, gradeClasses]) => (
+        <div key={grade} style={{ marginBottom: 28 }}>
+          <div style={{ fontWeight: 700, fontSize: 14, color: "#38bdf8", marginBottom: 10 }}>
+            {grade === MIXED_GRADE_KEY ? "特別支援" : `${grade}年`}
           </div>
-          {gradeLessons.map(lesson => {
-            const classNames = (lesson.classIds || []).map(id => classes.find(c => c.id === id)?.name || id).join("・");
-            const teacher = teachers.find(t => t.id === lesson.teacherId);
-            const subTeacher = teachers.find(t => t.id === (lesson.subTeacherIds || [])[0]);
-            const placed = getLessonPlacedTotal(lesson, placements);
-            const required = getLessonRequiredTotal(lesson);
-            const color = SUBJECT_COLORS[lesson.subject] || "#94a3b8";
-            return (
-              <div key={lesson.id} style={{
-                background: "#0f172a", border: `1px solid ${color}44`, borderLeft: `3px solid ${color}`,
-                borderRadius: 6, padding: "6px 8px", marginBottom: 6,
-              }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span style={{ fontWeight: 700, fontSize: 12, color }}>
-                    {lesson.subject}
-                    {lesson.simultaneous && (lesson.classIds || []).length > 1 && (
-                      <span style={{ marginLeft: 4, fontSize: 9, color: "#38bdf8" }}>合同</span>
-                    )}
-                    {lesson.assignMode === "homeroom" && (
-                      <span style={{ marginLeft: 4, fontSize: 9, color: "#a78bfa" }}>学級担任</span>
-                    )}
-                  </span>
-                  <span style={{ fontSize: 10, fontWeight: 700, color: placed >= required ? "#22c55e" : "#f59e0b" }}>
-                    {placed}/{required}
-                  </span>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "flex-start" }}>
+            {gradeClasses.map(cls => {
+              const classLessons = lessons.filter(l => (l.classIds || []).includes(cls.id));
+              return (
+                <div key={cls.id} style={{
+                  background: "#1e293b", border: "1px solid #334155", borderRadius: 8,
+                  padding: 10, width: 220, flexShrink: 0,
+                }}>
+                  <div style={{
+                    fontWeight: 700, fontSize: 13, marginBottom: 8, color: "#e2e8f0",
+                    display: "flex", justifyContent: "space-between",
+                  }}>
+                    <span>{cls.name}</span>
+                    <span style={{ fontSize: 10, color: "#64748b", fontWeight: 400 }}>{classLessons.length}件</span>
+                  </div>
+                  {classLessons.length === 0 && (
+                    <p style={{ fontSize: 11, color: "#475569" }}>授業がありません</p>
+                  )}
+                  {classLessons.map(lesson => {
+                    const color = SUBJECT_COLORS[lesson.subject] || "#94a3b8";
+                    const teacher = teachers.find(t => t.id === lesson.teacherId);
+                    const placed = countLessonPlacedForClass(lesson.id, cls.id, placements);
+                    const required = lesson.weeklyHours || 1;
+                    const isJoint = lesson.simultaneous && (lesson.classIds || []).length > 1;
+                    return (
+                      <div key={lesson.id} onClick={() => onEditLesson(lesson)} style={{
+                        display: "flex", justifyContent: "space-between", alignItems: "center",
+                        background: "#0f172a", borderLeft: `3px solid ${color}`, borderRadius: 4,
+                        padding: "4px 6px", marginBottom: 4, cursor: "pointer",
+                      }}>
+                        <div>
+                          <div style={{ fontSize: 11, fontWeight: 700, color }}>
+                            {lesson.subject}
+                            {isJoint && <span style={{ marginLeft: 4, fontSize: 9, color: "#38bdf8" }}>合同</span>}
+                            {lesson.assignMode === "homeroom" && (
+                              <span style={{ marginLeft: 4, fontSize: 9, color: "#a78bfa" }}>担任</span>
+                            )}
+                          </div>
+                          <div style={{ fontSize: 10, color: "#64748b" }}>
+                            {teacher ? teacher.name : "未定"} / 週{lesson.weeklyHours || 1}
+                          </div>
+                        </div>
+                        <span style={{ fontSize: 10, fontWeight: 700, color: placed >= required ? "#22c55e" : "#f59e0b" }}>
+                          {placed}/{required}
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
-                <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 2 }}>{classNames || "対象クラス未設定"}</div>
-                <div style={{ fontSize: 10, color: "#64748b" }}>
-                  {teacher ? teacher.name : "担当未定"}{subTeacher ? `・${subTeacher.name}` : ""} / 週{lesson.weeklyHours || 1}
-                </div>
-                <div style={{ display: "flex", gap: 4, marginTop: 4 }}>
-                  <button onClick={() => onEditLesson(lesson)} style={{ ...smallBtnStyle, flex: 1 }}>✏️ 編集</button>
-                  <button onClick={() => onDeleteLesson(lesson.id)} style={{ ...smallBtnStyle, color: "#ef4444" }}>🗑 削除</button>
-                </div>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
         </div>
       ))}
     </div>
