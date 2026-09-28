@@ -322,14 +322,19 @@ function checkErrors(placements, lessons, teachers, meetings, days, classes = []
       if (!lesson) continue;
 
       // 教員重複チェック
+      const isJointLesson = lesson.simultaneous && (lesson.classIds || []).length > 1;
       const teacherIds = [lesson.teacherId, ...(lesson.subTeacherIds || [])].filter(Boolean);
       for (const tid of teacherIds) {
-        // 他の授業で同じ教員が同コマにいるか（同一セル内の重複も対象）
+        // 他の授業で同じ教員が同コマにいるか（同一セル内の重複も対象）。
+        // 同じ授業（lessonId一致）でも、合同授業（simultaneous）でなければ
+        // 「同じ教員が非合同で複数クラスに同時配置されている」実質的な重複なので対象にする。
+        // 完全に同じ配置インスタンス（同一セル×同一授業）との自己比較のみ除外する。
         for (const [k2, ids2] of Object.entries(placements)) {
           const [, d2, p2] = k2.split("__");
           if (d2 !== dayId || p2 !== period) continue;
           for (const lid2 of (ids2 || [])) {
-            if (lid2 === lessonId) continue;
+            if (k2 === key && lid2 === lessonId) continue;
+            if (lid2 === lessonId && isJointLesson) continue;
             const l2 = lessons.find(l => l.id === lid2);
             if (!l2) continue;
             const tids2 = [l2.teacherId, ...(l2.subTeacherIds || [])].filter(Boolean);
