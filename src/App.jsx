@@ -45,6 +45,29 @@ function generateId() {
   return Math.random().toString(36).slice(2, 10);
 }
 
+// CSVをUTF-8 BOM付きでダウンロードする（Excelで文字化けしないようにするため）
+function downloadCSV(filename, csvContent) {
+  const blob = new Blob([String.fromCharCode(0xfeff) + csvContent], { type: "text/csv;charset=utf-8;" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+}
+
+// 学級名一覧を「・」区切りの文字列にする（合同授業で複数クラスの場合に使用）
+function formatClassNames(classIds, classes) {
+  return (classIds || []).map(cid => classes.find(c => c.id === cid)?.name || cid).join("・");
+}
+
+// 授業の担当教員名を「主担当・副担当」の形式でまとめる
+function formatTeacherNames(lesson, teachers) {
+  const names = [lesson.teacherId, ...(lesson.subTeacherIds || [])]
+    .filter(Boolean)
+    .map(tid => teachers.find(t => t.id === tid)?.name)
+    .filter(Boolean);
+  return names.join("・");
+}
+
 // ============================================================
 // 自動配置条件（placementRules）
 // ------------------------------------------------------------
@@ -625,6 +648,7 @@ export default function TimetableApp() {
   const [newMeeting, setNewMeeting] = useState({ name: "", teacherIds: [], dayId: "mon", period: 1 });
   const [toast, setToast] = useState(null);
   const [unplacedReasons, setUnplacedReasons] = useState({}); // 直近の自動生成で配置できなかった理由
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
 
   // エラー再計算
   useEffect(() => {
@@ -937,8 +961,8 @@ export default function TimetableApp() {
     }
   }, []);
 
-  // Excel風CSV出力
-  const handleExportCSV = () => {
+  // 学級時間割CSV出力（各セル：教科 / 担当教員）
+  const handleExportClassCSV = () => {
     if (errors.length > 0) {
       if (!window.confirm(`エラーが${errors.length}件残っています。このまま出力しますか？`)) return;
     }
@@ -953,21 +977,66 @@ export default function TimetableApp() {
       for (const col of columns) {
         const key = `${cls.id}__${col.dayId}__${col.period}`;
         const ids = placements[key] || [];
-        const names = ids.map(id => {
+        const cellText = ids.map(id => {
           const l = lessons.find(l => l.id === id);
-          return l ? l.subject : "";
-        });
-        csv += `"${names.join("/")}",`;
+          if (!l) return "";
+          const teacherNames = formatTeacherNames(l, teachers);
+          return teacherNames ? `${l.subject} / ${teacherNames}` : l.subject;
+        }).join("; ");
+        csv += `"${cellText}",`;
       }
       csv += "\n";
     }
 
-    const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8;" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `timetable_${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    showToast("CSV（Excel用）を出力しました", "success");
+    downloadCSV(`class_timetable_${new Date().toISOString().slice(0, 10)}.csv`, csv);
+    showToast("学級時間割（CSV）を出力しました", "success");
+    setExportMenuOpen(false);
+  };
+
+  // 教員時間割CSV出力（各セル：教科 / 担当学級、会議がある場合は会議名も表示）
+  const handleExportTeacherCSV = () => {
+    if (errors.length > 0) {
+      if (!window.confirm(`エラーが${errors.length}件残っています。このまま出力しますか？`)) return;
+    }
+    let csv = "教員,";
+    for (const col of columns) {
+      csv += `${col.dayLabel}${col.period},`;
+    }
+    csv += "\n";
+
+    for (const teacher of teachers) {
+      csv += `${teacher.name},`;
+      for (const col of columns) {
+        const parts = [];
+        const seenLessonIds = new Set();
+
+        for (const [k, ids] of Object.entries(placements)) {
+          const keyParts = k.split("__");
+          if (keyParts[1] !== col.dayId || String(keyParts[2]) !== String(col.period)) continue;
+          for (const lessonId of (ids || [])) {
+            if (seenLessonIds.has(lessonId)) continue;
+            const l = lessons.find(l => l.id === lessonId);
+            if (!l) continue;
+            if (![l.teacherId, ...(l.subTeacherIds || [])].includes(teacher.id)) continue;
+            seenLessonIds.add(lessonId);
+            const classNames = formatClassNames(l.classIds, classes);
+            parts.push(classNames ? `${l.subject} / ${classNames}` : l.subject);
+          }
+        }
+
+        const meeting = meetings.find(m =>
+          m.dayId === col.dayId && String(m.period) === String(col.period) && m.teacherIds.includes(teacher.id)
+        );
+        if (meeting) parts.push(meeting.name);
+
+        csv += `"${parts.join("; ")}",`;
+      }
+      csv += "\n";
+    }
+
+    downloadCSV(`teacher_timetable_${new Date().toISOString().slice(0, 10)}.csv`, csv);
+    showToast("教員時間割（CSV）を出力しました", "success");
+    setExportMenuOpen(false);
   };
 
   // 授業作成
@@ -1161,7 +1230,37 @@ export default function TimetableApp() {
 
         <div style={{ width: 1, background: "#334155", height: 24, margin: "0 4px" }} />
 
-        <BtnH onClick={handleExportCSV} color="#a78bfa">📊 CSV出力</BtnH>
+        <div style={{ position: "relative" }}>
+          <BtnH onClick={() => setExportMenuOpen(o => !o)} color="#a78bfa">📊 出力</BtnH>
+          {exportMenuOpen && (
+            <>
+              <div onClick={() => setExportMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 499 }} />
+              <div style={{
+                position: "absolute", top: "100%", left: 0, marginTop: 4,
+                background: "#1e293b", border: "1px solid #334155", borderRadius: 8,
+                boxShadow: "0 10px 30px rgba(0,0,0,0.5)", zIndex: 500, width: 230, padding: 6,
+              }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#94a3b8", padding: "4px 8px 6px" }}>
+                  時間割を出力
+                </div>
+                <button onClick={handleExportClassCSV} style={{
+                  display: "block", width: "100%", textAlign: "left", background: "none", border: "none",
+                  color: "#e2e8f0", padding: "8px", borderRadius: 6, cursor: "pointer",
+                }}>
+                  <div style={{ fontSize: 12, fontWeight: 700 }}>🏫 学級時間割</div>
+                  <div style={{ fontSize: 10, color: "#64748b" }}>教科＋担当教員</div>
+                </button>
+                <button onClick={handleExportTeacherCSV} style={{
+                  display: "block", width: "100%", textAlign: "left", background: "none", border: "none",
+                  color: "#e2e8f0", padding: "8px", borderRadius: 6, cursor: "pointer",
+                }}>
+                  <div style={{ fontSize: 12, fontWeight: 700 }}>👨‍🏫 教員時間割</div>
+                  <div style={{ fontSize: 10, color: "#64748b" }}>教科＋担当学級</div>
+                </button>
+              </div>
+            </>
+          )}
+        </div>
 
         <div style={{ width: 1, background: "#334155", height: 24, margin: "0 4px" }} />
 
@@ -1228,7 +1327,7 @@ export default function TimetableApp() {
 
         {/* 左パネル：授業パレット */}
         <div style={{
-          width: 200, flexShrink: 0, background: "#1e293b",
+          width: 176, flexShrink: 0, background: "#1e293b",
           borderRight: "1px solid #334155", display: "flex", flexDirection: "column",
           overflow: "hidden",
         }}>
@@ -1450,7 +1549,7 @@ export default function TimetableApp() {
 
       {/* 下パネル */}
       <div style={{
-        height: 180, flexShrink: 0, background: "#1e293b",
+        height: 140, flexShrink: 0, background: "#1e293b",
         borderTop: "1px solid #334155", display: "flex", flexDirection: "column",
       }}>
         <div style={{ display: "flex", borderBottom: "1px solid #334155" }}>
@@ -1557,14 +1656,14 @@ function ClassGridView({
     <div style={{ minWidth: "fit-content" }}>
       {/* ヘッダー行（曜日） */}
       <div style={{ display: "flex", position: "sticky", top: 0, zIndex: 10 }}>
-        <div style={{ width: 60, flexShrink: 0, background: headerBg }} />
+        <div style={{ width: 64, flexShrink: 0, background: headerBg }} />
         {days.map(day => (
           <div key={day.id} style={{
             display: "flex", borderLeft: `2px solid ${dayBorder}`,
           }}>
             {Array.from({ length: day.periods }, (_, i) => (
               <div key={i} style={{
-                width: 66, flexShrink: 0, background: headerBg,
+                width: 80, flexShrink: 0, background: headerBg,
                 textAlign: "center", padding: "4px 0", fontSize: 11,
                 color: "#94a3b8", fontWeight: 700,
                 borderRight: `1px solid ${borderColor}`,
@@ -1600,7 +1699,7 @@ function ClassGridView({
             <div key={cls.id} style={{ display: "flex" }}>
               {/* 学級名 */}
               <div style={{
-                width: 60, flexShrink: 0, background: "#1e293b",
+                width: 64, flexShrink: 0, background: "#1e293b",
                 display: "flex", alignItems: "center", justifyContent: "center",
                 fontSize: 11, fontWeight: 700, color: "#94a3b8",
                 borderBottom: `1px solid ${borderColor}`,
@@ -1627,7 +1726,7 @@ function ClassGridView({
                         onDragOver={e => handleDragOver(e, key)}
                         onDrop={e => handleDrop(e, cls.id, day.id, period)}
                         style={{
-                          width: 66, height: 44, flexShrink: 0,
+                          width: 80, height: 44, flexShrink: 0,
                           background: isOver ? "#1e3a5f" : cellBg,
                           border: `1px solid ${hasError ? "#ef4444" : hasWarn ? "#f59e0b" : borderColor}`,
                           borderWidth: hasError || hasWarn ? 2 : 1,
@@ -1709,12 +1808,12 @@ function TeacherGridView({ teachers, columns, days, teacherGrid, meetings, error
     <div style={{ minWidth: "fit-content" }}>
       {/* ヘッダー */}
       <div style={{ display: "flex", position: "sticky", top: 0, zIndex: 10 }}>
-        <div style={{ width: 80, flexShrink: 0, background: "#1e293b" }} />
+        <div style={{ width: 84, flexShrink: 0, background: "#1e293b" }} />
         {days.map(day => (
           <div key={day.id} style={{ display: "flex", borderLeft: "2px solid #334155" }}>
             {Array.from({ length: day.periods }, (_, i) => (
               <div key={i} style={{
-                width: 80, flexShrink: 0, background: "#1e293b",
+                width: 92, flexShrink: 0, background: "#1e293b",
                 textAlign: "center", padding: "4px 0", fontSize: 11,
                 color: "#94a3b8", fontWeight: 700,
                 borderRight: "1px solid #1e293b",
@@ -1730,7 +1829,7 @@ function TeacherGridView({ teachers, columns, days, teacherGrid, meetings, error
       {teacherGrid.map(({ teacher, row }) => (
         <div key={teacher.id} style={{ display: "flex" }}>
           <div style={{
-            width: 80, flexShrink: 0, background: "#1e293b",
+            width: 84, flexShrink: 0, background: "#1e293b",
             display: "flex", alignItems: "center", justifyContent: "center",
             fontSize: 11, fontWeight: 700, color: "#94a3b8",
             borderBottom: "1px solid #1e293b",
@@ -1752,7 +1851,7 @@ function TeacherGridView({ teachers, columns, days, teacherGrid, meetings, error
 
                 return (
                   <div key={period} style={{
-                    width: 80, height: 44, flexShrink: 0,
+                    width: 92, height: 44, flexShrink: 0,
                     background: hasMeeting ? "#1e3a5f33" : "#0f172a",
                     border: "1px solid #1e293b",
                     display: "flex", flexDirection: "column",
@@ -2932,8 +3031,18 @@ ONにすると、同じクラス・同じ日に同じ教科を2回配置する�
 # 出力方法
 
 ## CSV出力（Excel対応）
-ヘッダーの「📊 CSV出力」をクリック
-→ Excelで開ける形式でダウンロードされます
+ヘッダーの「📊 出力」をクリックすると、メニューから選べます。
+
+- **🏫 学級時間割**：学級×コマの表。各セルに「教科 / 担当教員」を表示します
+  （副担当がいる場合は「教科 / 主担当・副担当」、1コマに複数授業がある
+  場合はセミコロン区切りで表示）
+- **👨‍🏫 教員時間割**：教員×コマの表。各セルに「教科 / 対象学級」を表示します
+  （合同授業で複数クラスの場合は「教科 / 3-1・3-2」のようにまとめて表示）。
+  会議が登録されている時間は会議名を表示し、授業と重なっている場合は
+  両方表示します
+
+現在どちらのビュー（学級／教員）を表示していても、両方とも出力できます。
+出力形式はどちらもExcelで開けるCSV（UTF-8 BOM付き）です。
 
 ## JSON出力
 「📤 JSON出力」をクリック
