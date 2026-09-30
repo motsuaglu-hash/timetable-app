@@ -835,9 +835,22 @@ export default function TimetableApp() {
     setTimeout(() => setToast(null), duration);
   };
 
-  // 自動生成
+  // 自動生成：固定コマ以外を一旦すべてリセットしてから最初から組み直す
   const handleAutoGenerate = () => {
-    const result = autoGenerate(lessons, placements, days, meetings, teachers, classes, placementRules);
+    const hasExistingNonFixed = Object.entries(placements).some(
+      ([key, ids]) => (ids || []).some(id => !isFixed(key, id))
+    );
+    if (hasExistingNonFixed) {
+      if (!window.confirm("固定コマ以外の配置をすべてリセットして、最初から自動生成し直します。よろしいですか？")) return;
+    }
+
+    const resetPlacements = {};
+    for (const [key, ids] of Object.entries(placements)) {
+      const fixedIds = (ids || []).filter(id => isFixed(key, id));
+      if (fixedIds.length > 0) resetPlacements[key] = fixedIds;
+    }
+
+    const result = autoGenerate(lessons, resetPlacements, days, meetings, teachers, classes, placementRules);
     saveHistory(result.placements);
     setUnplacedReasons(result.unplacedReasons);
     const unplacedCount = Object.keys(result.unplacedReasons).length;
@@ -845,6 +858,44 @@ export default function TimetableApp() {
       showToast(`自動生成完了。${unplacedCount}件の授業を配置できませんでした（未配置タブを確認）`, "error");
     } else {
       showToast("自動生成完了！内容を確認して調整してください", "success");
+    }
+  };
+
+  // 再配置：エラー・警告が出ているコマ（固定コマを除く）だけを一旦外し、
+  // 空いたコマと元々の空きコマをまとめて自動生成で埋め直す
+  const handleRearrange = () => {
+    let newP = { ...placements };
+    const touched = new Set();
+
+    for (const e of errors) {
+      if (isFixed(e.cellKey, e.lessonId)) continue;
+      const instanceKey = `${e.cellKey}::${e.lessonId}`;
+      if (touched.has(instanceKey)) continue;
+      touched.add(instanceKey);
+
+      const lesson = lessons.find(l => l.id === e.lessonId);
+      const isJoint = lesson?.simultaneous && (lesson.classIds || []).length > 1;
+      if (isJoint) {
+        const [, dayId, period] = e.cellKey.split("__");
+        for (const cid of lesson.classIds) {
+          const k = `${cid}__${dayId}__${period}`;
+          newP[k] = (newP[k] || []).filter(id => id !== e.lessonId);
+        }
+      } else {
+        newP[e.cellKey] = (newP[e.cellKey] || []).filter(id => id !== e.lessonId);
+      }
+    }
+
+    const result = autoGenerate(lessons, newP, days, meetings, teachers, classes, placementRules);
+    saveHistory(result.placements);
+    setUnplacedReasons(result.unplacedReasons);
+    const unplacedCount = Object.keys(result.unplacedReasons).length;
+    if (touched.size === 0) {
+      showToast("エラー・警告のあるコマはありませんでした（空きコマのみ埋めました）", "info");
+    } else if (unplacedCount > 0) {
+      showToast(`再配置しました（${touched.size}件を調整）。${unplacedCount}件の授業を配置できませんでした`, "error");
+    } else {
+      showToast(`再配置しました（${touched.size}件のエラー・警告を調整）`, "success");
     }
   };
 
@@ -1222,16 +1273,7 @@ export default function TimetableApp() {
         <div style={{ width: 1, background: "#334155", height: 24, margin: "0 4px" }} />
 
         <BtnH onClick={handleAutoGenerate} color="#f59e0b">⚡ 自動生成</BtnH>
-        <BtnH onClick={() => {
-          const result = autoGenerate(lessons, placements, days, meetings, teachers, classes, placementRules);
-          saveHistory(result.placements);
-          setUnplacedReasons(result.unplacedReasons);
-          const unplacedCount = Object.keys(result.unplacedReasons).length;
-          showToast(
-            unplacedCount > 0 ? `再配置しました。${unplacedCount}件の授業を配置できませんでした` : "再配置しました",
-            unplacedCount > 0 ? "error" : "success"
-          );
-        }} color="#fb923c">🔄 再配置</BtnH>
+        <BtnH onClick={handleRearrange} color="#fb923c">🔄 再配置</BtnH>
 
         <div style={{ width: 1, background: "#334155", height: 24, margin: "0 4px" }} />
 
@@ -2935,14 +2977,23 @@ function ManualPanel() {
 3. ヘッダーの「⚡ 自動生成」をクリック
 
 ## 自動生成の仕組み
-- 固定コマを除いて、未配置の授業を順番に配置します
+- 「⚡ 自動生成」は、固定コマ以外の配置を**一旦すべてリセットしてから**、
+  最初から組み直します（確認ダイアログが出ます）
 - 教員重複・会議コマ・同日同教科を避けるよう配置します
 - ランダム性があるため、何度か実行すると異なる結果が出ます
+
+## 🔄 再配置との違い
+- 「🔄 再配置」は全体をリセットしません。**エラー・警告が出ているコマ
+  （教員重複・会議コマ配置・連続授業超過・禁止時間・同日同教科など）
+  だけを一旦外し、空いたコマと元々の空きコマを自動生成で埋め直します**
+- 問題のない配置はそのまま保持されるので、手動で調整した部分を崩さずに
+  問題箇所だけをやり直したいときは「🔄 再配置」を使ってください
+- 固定コマはどちらの操作でも対象外です
 
 ## 自動生成後の確認
 - 下パネルの「未配置」タブで配置漏れを確認
 - 「エラー」タブでエラーを確認
-- 必要に応じて手動調整を行います
+- 必要に応じて手動調整、または「🔄 再配置」で問題箇所を調整します
     `,
     autoRules: `
 # 自動配置条件（Ver1.2で追加）
