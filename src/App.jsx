@@ -59,15 +59,6 @@ function formatClassNames(classIds, classes) {
   return (classIds || []).map(cid => classes.find(c => c.id === cid)?.name || cid).join("・");
 }
 
-// 授業の担当教員名を「主担当・副担当」の形式でまとめる
-function formatTeacherNames(lesson, teachers) {
-  const names = [lesson.teacherId, ...(lesson.subTeacherIds || [])]
-    .filter(Boolean)
-    .map(tid => teachers.find(t => t.id === tid)?.name)
-    .filter(Boolean);
-  return names.join("・");
-}
-
 // ============================================================
 // 自動配置条件（placementRules）
 // ------------------------------------------------------------
@@ -1017,7 +1008,7 @@ export default function TimetableApp() {
     }
   }, []);
 
-  // 学級時間割CSV出力（各セル：教科 / 担当教員）
+  // 学級時間割CSV出力（各セル：教科名・主担当・副担当を3段で表示）
   const handleExportClassCSV = () => {
     if (errors.length > 0) {
       if (!window.confirm(`エラーが${errors.length}件残っています。このまま出力しますか？`)) return;
@@ -1029,16 +1020,23 @@ export default function TimetableApp() {
     csv += "\n";
 
     for (const cls of classes) {
-      csv += `${cls.name},`;
+      // 学級名が「1-1」のような表記だと、Excelが日付（1月1日）と誤認識するため、
+      // ="1-1" の形式にして文字列として扱わせる
+      csv += `="${cls.name}",`;
       for (const col of columns) {
         const key = `${cls.id}__${col.dayId}__${col.period}`;
         const ids = placements[key] || [];
         const cellText = ids.map(id => {
           const l = lessons.find(l => l.id === id);
           if (!l) return "";
-          const teacherNames = formatTeacherNames(l, teachers);
-          return teacherNames ? `${l.subject} / ${teacherNames}` : l.subject;
-        }).join("; ");
+          // 教科名・主担当・副担当（いる場合）を3段で表示する
+          const lines = [l.subject];
+          const mainTeacher = teachers.find(t => t.id === l.teacherId);
+          if (mainTeacher) lines.push(mainTeacher.name);
+          const subTeacher = teachers.find(t => t.id === (l.subTeacherIds || [])[0]);
+          if (subTeacher) lines.push(subTeacher.name);
+          return lines.join("\r\n");
+        }).join("\r\n\r\n");
         csv += `"${cellText}",`;
       }
       csv += "\n";
@@ -1064,20 +1062,29 @@ export default function TimetableApp() {
       csv += `${teacher.name},`;
       for (const col of columns) {
         const parts = [];
-        const seenLessonIds = new Set();
+        // 授業の定義上のクラス一覧（classIds）ではなく、このコマに実際に配置
+        // されているクラスだけを集める（非合同の複数クラス授業はクラスごとに
+        // 別々の時間へ配置されるため、授業定義のクラス一覧をそのまま出すと
+        // 配置されていないクラスまで表示されてしまう）
+        const lessonClassIds = new Map(); // lessonId -> このコマに実際配置されているclassIdの配列
 
         for (const [k, ids] of Object.entries(placements)) {
           const keyParts = k.split("__");
           if (keyParts[1] !== col.dayId || String(keyParts[2]) !== String(col.period)) continue;
+          const classId = keyParts[0];
           for (const lessonId of (ids || [])) {
-            if (seenLessonIds.has(lessonId)) continue;
             const l = lessons.find(l => l.id === lessonId);
             if (!l) continue;
             if (![l.teacherId, ...(l.subTeacherIds || [])].includes(teacher.id)) continue;
-            seenLessonIds.add(lessonId);
-            const classNames = formatClassNames(l.classIds, classes);
-            parts.push(classNames ? `${l.subject} / ${classNames}` : l.subject);
+            if (!lessonClassIds.has(lessonId)) lessonClassIds.set(lessonId, []);
+            lessonClassIds.get(lessonId).push(classId);
           }
+        }
+
+        for (const [lessonId, classIds] of lessonClassIds) {
+          const l = lessons.find(l => l.id === lessonId);
+          const classNames = formatClassNames(classIds, classes);
+          parts.push(classNames ? `${l.subject} / ${classNames}` : l.subject);
         }
 
         const meeting = meetings.find(m =>
@@ -3089,9 +3096,9 @@ ONにすると、同じクラス・同じ日に同じ教科を2回配置する�
 ## CSV出力（Excel対応）
 ヘッダーの「📊 出力」をクリックすると、メニューから選べます。
 
-- **🏫 学級時間割**：学級×コマの表。各セルに「教科 / 担当教員」を表示します
-  （副担当がいる場合は「教科 / 主担当・副担当」、1コマに複数授業がある
-  場合はセミコロン区切りで表示）
+- **🏫 学級時間割**：学級×コマの表。各セルに教科名・主担当・副担当
+  （いる場合）を3段で表示します（Excelでセル内改行として表示されます）。
+  1コマに複数授業がある場合は空行で区切って表示します
 - **👨‍🏫 教員時間割**：教員×コマの表。各セルに「教科 / 対象学級」を表示します
   （合同授業で複数クラスの場合は「教科 / 3-1・3-2」のようにまとめて表示）。
   会議が登録されている時間は会議名を表示し、授業と重なっている場合は
